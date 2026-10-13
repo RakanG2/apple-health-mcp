@@ -33,12 +33,29 @@ function chunk<T>(arr: T[], size: number): T[][] {
 // - health_events: delete existing rows matching (event_type,date,payload) then insert,
 //   since a portable jsonb-hash unique index isn't available across drivers.
 export async function persist(db: Db, data: NormalizeResult): Promise<IngestSummary> {
-  for (const batch of chunk(data.metricRows, METRIC_CHUNK)) {
+  // De-duplicate on the unique key (last one wins): ON CONFLICT DO UPDATE fails if
+  // the same key appears twice in one statement.
+  const byKey = new Map<string, (typeof data.metricRows)[number]>();
+  for (const r of data.metricRows as any[]) {
+    byKey.set(`${r.metricName}|${new Date(r.date).toISOString()}|${r.source ?? ""}`, r);
+  }
+  const metricRows = [...byKey.values()];
+  for (const batch of chunk(metricRows, METRIC_CHUNK)) {
     await db
       .insert(metricSamples)
       .values(batch)
-      .onConflictDoNothing({
+      .onConflictDoUpdate({
         target: [metricSamples.metricName, metricSamples.date, metricSamples.source],
+        set: {
+          units: sql`excluded.units`,
+          qty: sql`excluded.qty`,
+          min: sql`excluded.min`,
+          avg: sql`excluded.avg`,
+          max: sql`excluded.max`,
+          systolic: sql`excluded.systolic`,
+          diastolic: sql`excluded.diastolic`,
+          extra: sql`excluded.extra`,
+        },
       });
   }
 
